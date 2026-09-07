@@ -79,6 +79,10 @@ from .microduck_polite_bow_env_cfg import (
     make_microduck_polite_bow_env_cfg,
     MicroduckPoliteBowRlCfg,
 )
+from .microduck_one_leg_env_cfg import (
+    make_microduck_one_leg_env_cfg,
+    MicroduckOneLegRlCfg,
+)
 from .backlash import make_backlash_variant
 
 # Standard velocity task
@@ -247,6 +251,16 @@ register_mjlab_task(
     runner_cls=MicroduckOnPolicyRunner,
 )
 
+# OneLeg — lift one knee into a flamingo, hold ~2 s, put it back down. Rides the
+# ground-pick slot at runtime (phase encoding on twist), period 6 s.
+register_mjlab_task(
+    task_id="Mjlab-OneLeg-Flat-MicroDuck",
+    env_cfg=make_microduck_one_leg_env_cfg(),
+    play_env_cfg=make_microduck_one_leg_env_cfg(play=True),
+    rl_cfg=MicroduckOneLegRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
 # Backlash variants — ±1° serial gear play per servo + encoder-through-backlash
 # actuator feedback and joint obs (see tasks/backlash.py). Each family keeps its
 # base task's collision model: Velocity → robot_walk_backlash.xml,
@@ -284,6 +298,9 @@ _BACKLASH_TASKS = (
     # PoliteBow builds on the velocity recipe → walk model, so its backlash twin
     # takes the walk backlash robot (keeps the A/B unconfounded).
     ("Mjlab-PoliteBow-Flat-Backlash-MicroDuck", make_microduck_polite_bow_env_cfg, {}, MicroduckPoliteBowRlCfg, _BL_WALK),
+    # OneLeg also builds on the velocity recipe → walk model, so its backlash
+    # twin takes the walk backlash robot (keeps the A/B unconfounded).
+    ("Mjlab-OneLeg-Flat-Backlash-MicroDuck", make_microduck_one_leg_env_cfg, {}, MicroduckOneLegRlCfg, _BL_WALK),
 )
 for _task_id, _make_cfg, _kw, _rl_cfg, _robot_cfg in _BACKLASH_TASKS:
     register_mjlab_task(
