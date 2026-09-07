@@ -34,10 +34,15 @@ unchanged so the runtime can hot-swap this policy with the others.
     head_pitch INCREASING tips the beak down. head_yaw/head_roll stay at 0 so
     the bow is purely sagittal.
   - Static balance: the head is ~38% of body mass, so bowing it forward moves
-    the whole-body CoM forward by 22 mm (from +0.6 mm at HOME). The foot
-    support polygon is 71 mm fore/aft, leaving ~21 mm of forward margin at the
+    the whole-body CoM forward by 26 mm (from +0.6 mm at HOME). The foot
+    support polygon is 71 mm fore/aft, leaving ~17 mm of forward margin at the
     chosen depth — feasible without a prescribed trunk lean, so none is
-    prescribed and the policy finds its own counterbalance.
+    prescribed and the policy finds its own counterbalance. Run 1 confirmed
+    this: zero falls and full-length episodes from ~iteration 150 onward.
+  - Depth is set by the keyframe, not by training. Run 1 tracked the commanded
+    target to within 1.3° (bow_pose 5.90/6.00) while still looking shallow —
+    the reward had nothing left to push on. If the bow looks wrong, change
+    BOW_POSE; do not train longer.
   - A settle test is NOT meaningful for this task: microduck cannot hold ANY
     standing pose open-loop (XML kp 0.55; it tips over from the STAND keyframe
     in ~1.5 s with BAM actuators). Balance here is the policy's job, and the
@@ -93,12 +98,24 @@ RISE_END    = 0.62
 # ── BOW keyframe (rad, by joint NAME — resolution by name keeps this correct on
 # the backlash model, where passive joints interleave). Offsets from HOME
 # (neck_pitch/head_pitch = +0.3491):
-#     neck_pitch  HOME - 0.70  → head swings forward and down
-#     head_pitch  HOME + 0.40  → beak tips down (~63° below horizontal)
-# Mouth ends 67 mm below its standing height, ~184 mm above the floor: clearly a
-# bow, nowhere near the ground. Deeper (neck -1.0 / head +0.6) reads as
-# "inspecting its feet" and leaves only 17 mm of CoM margin — see the module
-# docstring's measurements before changing these.
+#     neck_pitch  HOME - 1.00  → head swings forward and down
+#     head_pitch  HOME + 0.60  → beak tips to exactly vertical
+# Mouth ends 93 mm below its standing height, ~159 mm above the floor: an
+# unmistakable deep bow, still nowhere near the ground.
+#
+# This is the DEEPEST sensible bow, not merely a deep one. Swept against the
+# 71 mm fore/aft support polygon (head drop | beak angle | CoM front margin):
+#     -0.70 / +0.40   67 mm |  63° | 20.8 mm   ← run 1: read as too shallow
+#     -0.85 / +0.50   81 mm |  78° | 18.2 mm
+#     -1.00 / +0.60   93 mm |  90° | 16.6 mm   ← here
+#     -1.20 / +0.70  104 mm |  70° | 15.8 mm
+#     -1.40 / +0.80  110 mm |  53° | 16.4 mm
+# Depth is nearly free in balance terms — 39% deeper costs 4 mm of margin,
+# because past this point the head tucks back toward the body and the CoM stops
+# travelling forward. But the BEAK ANGLE peaks here at vertical and then falls:
+# beyond -1.00/+0.60 the head rotates past vertical and the beak points back
+# under the robot, which reads as the head curling under rather than a deeper
+# bow. Going further looks worse, not deeper.
 #
 # ONLY the two joints that actually move belong here. head_yaw / head_roll are
 # held at HOME by `bow_sagittal` below instead. They used to sit in this dict at
@@ -109,8 +126,8 @@ RISE_END    = 0.62
 #     2 joints (this version):         stand-still 3.09 vs perfect 6.00 → signal 2.91
 # i.e. doing nothing scored 76% of the maximum. Keep this dict to moving joints.
 BOW_POSE = {
-    "neck_pitch": 0.3491 - 0.70,
-    "head_pitch": 0.3491 + 0.40,
+    "neck_pitch": 0.3491 - 1.00,
+    "head_pitch": 0.3491 + 0.60,
 }
 # Tracking std ≈ the error we still care about (~9°), not the max error.
 BOW_POSE_STD = 0.15
