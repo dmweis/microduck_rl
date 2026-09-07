@@ -14,6 +14,8 @@ policy that worked in the viewer and failed on hardware.
 uv run list-envs                                    # live task registry
 uv run train <TASK_ID> --env.scene.num-envs 4096    # train (add --hf-jobs for Hugging Face Jobs)
 uv run train <TASK_ID> --env.scene.num-envs 64 --agent.max_iterations 5   # SMOKE TEST — always run first
+uv run train <TASK_ID> --env.scene.num-envs 64 --agent.max_iterations 5 --gpu-ids None --agent.logger tensorboard
+                                                    # ...the same smoke test on a machine with NO GPU (see below)
 uv run play <TASK_ID> --wandb-run-path <entity/project/run_id>
 uv run scripts/export.py <TASK_ID> --wandb-run-path <...>   # → ONNX (bakes obs normalizer — mandatory path)
 uv run publish --task <TASK_ID> --wandb-run-path <...> --checkpoint N --repo <user>/microduck-<name> --kind episodic --duration-s 4.0
@@ -24,6 +26,17 @@ uv run --with pytest pytest tests/
 
 A 5-iteration smoke test at 64 envs catches ~95% of config errors for cents.
 Never launch a long run without one.
+
+**The smoke test needs no GPU and no wandb account** — it runs on a laptop in
+~15 s and still checks obs shape, every reward term computing, penalty signs,
+NaN-freedom and the ONNX export. `--gpu-ids None` is the CPU switch: mjlab's
+default is `gpu_ids=[0]`, an index into `CUDA_VISIBLE_DEVICES` (falling back to
+`torch.cuda.device_count()`), so with no CUDA present `select_gpus()` raises
+`IndexError: list index out of range` before iteration 0. That failure reads as
+"training is impossible on this machine" when the truth is "pass a flag" — it
+is the same crash as the aarch64 CPU-wheel trap below, from a different cause.
+`--agent.logger tensorboard` skips the wandb login. Do this after ANY cfg
+change, and before paying for GPU time.
 
 ## Repo map
 
