@@ -474,3 +474,79 @@ def test_swing_foot_air_is_safe_without_the_sensor():
     sensor-backed terms — a raise here would kill training mid-run)."""
     env = _AirEnv(contact=0, phase=0.3)
     assert microduck_mdp.swing_foot_air_phased(env, sensor_name="absent").item() == 0.0
+
+
+# ── Self-collision: the check the original keyframe solve was missing ────────
+# The first shipped FLAMINGO keyframe drove the swing shank 8.07 mm into the
+# trunk battery holder. The pose solve had constrained CoM margin and swing-foot
+# clearance but never self-contact, and nothing here caught it — the policy just
+# quietly learned to press its leg against its own body. This test is the guard.
+#
+# Oracle note: mj_geomDistance returns exactly 0.0 for these mesh-mesh pairs when
+# they are apart, so it CANNOT distinguish "far" from "touching" and must not be
+# used. Inflating geom_margin instead makes MuJoCo emit a contact whenever the
+# surfaces are within the probe distance, and contact.dist is then the true
+# signed separation — so "no contact at probe P" proves clearance > P.
+
+_SELF_COLLISION_PROBE = 0.020  # 20 mm
+
+
+def _self_collision_model():
+    import mujoco
+    from mjlab_microduck.robot.microduck_constants import MICRODUCK_WALK_XML
+    m = mujoco.MjModel.from_xml_path(str(MICRODUCK_WALK_XML))
+    self_geoms = [i for i in range(m.ngeom) if m.geom_contype[i] == 2]
+    assert len(self_geoms) >= 2, "walk model lost its self-collision geoms"
+    for g in self_geoms:
+        m.geom_margin[g] = _SELF_COLLISION_PROBE
+    return m, mujoco.MjData(m), set(self_geoms)
+
+
+def _clearance_along_ramp(pose: dict, samples: int = 81):
+    """Worst self-clearance over the commanded HOME -> pose ramp.
+
+    The reward tracks the INTERPOLATED target, so an endpoint-only check would
+    still let the policy be commanded through an interpenetration on the way in.
+    """
+    import mujoco
+    m, d, self_geoms = _self_collision_model()
+    names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j) for j in range(m.njnt)]
+    adr = {n: m.jnt_qposadr[i] for i, n in enumerate(names) if n}
+    home = {n: _home_of(n) for n in adr if n and not n.startswith("passive_")
+            and n != "trunk_base_freejoint"}
+
+    worst, worst_t = _SELF_COLLISION_PROBE, 0.0
+    for k in range(samples):
+        t = k / (samples - 1)
+        d.qpos[:] = 0.0
+        d.qpos[3] = 1.0
+        for n, h in home.items():
+            d.qpos[adr[n]] = h + t * (pose.get(n, h) - h)
+        mujoco.mj_forward(m, d)
+        hits = [c.dist for c in d.contact[:d.ncon]
+                if c.geom1 in self_geoms and c.geom2 in self_geoms]
+        if hits and min(hits) < worst:
+            worst, worst_t = min(hits), t
+    return worst, worst_t
+
+
+def test_oracle_detects_a_known_interpenetrating_pose():
+    """Guard the guard: the original keyframe must still read as colliding."""
+    bad = dict(_FLAMINGO_LEFT_SUPPORT)
+    bad["right_hip_pitch"] = -1.1335   # the pose that shipped, -64.9 deg
+    bad["right_hip_yaw"] = 0.3927
+    worst, _ = _clearance_along_ramp(bad, samples=41)
+    assert worst < 0, (
+        "the self-collision oracle no longer detects the pose that motivated it "
+        f"(got {worst * 1000:.2f} mm) — the check has silently stopped working"
+    )
+
+
+def test_flamingo_keyframe_is_self_collision_free():
+    """The commanded pose, and every point on the ramp to it, must not drive the
+    robot into its own battery holder."""
+    worst, t = _clearance_along_ramp(_FLAMINGO_LEFT_SUPPORT)
+    assert worst > 0, (
+        f"FLAMINGO keyframe commands self-interpenetration of "
+        f"{-worst * 1000:.2f} mm at blend {t:.2f}"
+    )

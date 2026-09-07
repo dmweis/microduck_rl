@@ -45,6 +45,14 @@ plane IS the ground); FK sweeps on ``robot_walk.xml``, 2026-09.
     — they are the balance actuators, and a tight pose reward would confiscate
     exactly the authority the task needs.
 
+  - **The swing leg is limited by self-collision before balance.** The thigh
+    lift that best counterweights the CoM also drives the swing shank into the
+    trunk battery holder. The shipped-then-fixed keyframe interpenetrated by
+    8.07 mm; backing the thigh off to -30° and taking the height back at the
+    knee costs 1.0 mm of CoM margin and clears it. Never solve this pose without
+    a self-contact constraint — ``test_flamingo_keyframe_is_self_collision_free``
+    is the guard, and it must keep passing.
+
   - A settle test is not meaningful (as for polite_bow): microduck cannot hold
     ANY standing pose open-loop (XML kp 0.55). The static margin above is the
     check that replaces it.
@@ -144,11 +152,38 @@ _FLAMINGO_LEFT_SUPPORT = {
     "left_hip_pitch":  +0.0276,   #  +1.6°  (HOME -26.2°)
     "left_knee":       -0.5344,   # -30.6°  (HOME  -0.3°)
     "left_ankle":      -0.3568,   # -20.4°  (HOME +26.0°)
-    # Swing leg — knee up and forward, sole ~105 mm off the floor.
+    # Swing leg — knee up and forward, sole ~57 mm off the floor.
+    #
+    # ⚠️ The thigh lift is limited by SELF-COLLISION, not by balance. The first
+    # version of this keyframe used hip_pitch -64.9° / knee +63.6°, which drove
+    # the swing shank 8.07 mm INTO the trunk battery holder (geoms leg_2 and
+    # trunk_base — the contype=2 self-collision set on the walk model). The pose
+    # solve had constrained CoM margin and foot clearance but never self-contact,
+    # so the reward was commanding the robot into its own body and the policy
+    # dutifully learned to press its leg there.
+    #
+    # Measured with the contact solver at an inflated geom_margin (mj_geomDistance
+    # returns exactly 0.0 for these mesh-mesh pairs when apart, so it CANNOT tell
+    # "far" from "touching" and is useless as a constraint — see the test):
+    #
+    #   thigh   knee   CoM margin   self-clearance   foot height
+    #    -64.9  +63.6      2.82 mm        -8.07 mm       105 mm   ← shipped, INVALID
+    #    -45    +63.6      2.37           -1.05           70
+    #    -40    +63.6      2.14           +0.04           62
+    #    -35    +63.6      1.87           +0.85           54
+    #    -30    +75        1.83           +1.38           57      ← here
+    #    -30    +85        2.00           +1.38           67      (knee inside the
+    #                                                             dof_pos_limits
+    #                                                             band, ±83.2°)
+    #
+    # Self-clearance is governed almost entirely by the THIGH lift; knee flexion
+    # barely moves it, but does buy back foot height and CoM margin. So the thigh
+    # comes down for clearance and the knee goes up to keep the flamingo legible.
+    # Costs 1.0 mm of CoM margin against a pose that was never actually valid.
     "right_hip_yaw":   +0.3927,   # +22.5°  (HOME   0.0°)
     "right_hip_roll":  -0.3368,   # -19.3°  (HOME  +5.0°)
-    "right_hip_pitch": -1.1335,   # -64.9°  (HOME +26.2°)
-    "right_knee":      +1.1107,   # +63.6°  (HOME   0.3°)
+    "right_hip_pitch": -0.5236,   # -30.0°  (HOME +26.2°)  thigh lift, clearance-limited
+    "right_knee":      +1.3090,   # +75.0°  (HOME   0.3°)  below the ±83.2° soft limit
     # Head — counterweights the lift; yaw/roll stay OUT of the keyframe on
     # purpose (see HEAD_JOINTS below).
     "neck_pitch":      +0.8297,   # +47.5°  (HOME +20.0°)
