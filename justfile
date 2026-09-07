@@ -90,3 +90,29 @@ resume-bow run_id iters="1000" timeout="2h":
         --agent.resume True \
         --wandb-run-path {{wandb_entity}}/mjlab_microduck/{{run_id}} \
         --hf-jobs --namespace {{hf_namespace}} --timeout {{timeout}}
+
+# Pulls the checkpoint from wandb, exports with the obs normalizer BAKED IN
+# (scripts/export.py is the only safe path — in-sim play applies the normalizer
+# itself and so hides a hand-converted checkpoint's bug), then runs the CPU
+# MuJoCo deployment rehearsal with the official walking policy in the other slot.
+# The bow rides the ground-pick slot, so press G in the viewer to trigger it;
+# the period must match BOW_PERIOD in the env cfg.
+
+# Export a polite-bow checkpoint from wandb and watch it in the local sim.
+sim-bow run_id checkpoint="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    D=$({{just_executable()}} policies)
+    CKPT_ARG=""
+    [ -n "{{checkpoint}}" ] && CKPT_ARG="--checkpoint {{checkpoint}}"
+    uv run scripts/export.py Mjlab-PoliteBow-Flat-MicroDuck \
+        --wandb-run-path {{wandb_entity}}/mjlab_microduck/{{run_id}} \
+        $CKPT_ARG --num-envs 1
+    mv output.onnx bow.onnx
+    # macOS forces mujoco.viewer.launch_passive to run under `mjpython`.
+    PY=$([ "$(uname -s)" = "Darwin" ] && echo mjpython || echo python)
+    uv run "$PY" scripts/infer_policy.py \
+        --new-cmd-obs \
+        --walking            "$D/alpha_walking.onnx" \
+        --ground-pick        bow.onnx \
+        --ground-pick-period 4.0
