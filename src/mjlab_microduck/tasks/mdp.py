@@ -7186,3 +7186,113 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# --------------------------------------------------------------------------- #
+# OneLeg — single-support (flamingo) balance                                   #
+# --------------------------------------------------------------------------- #
+#
+# Measured 2026-09 before any training (scratchpad FK sweeps on robot_walk.xml,
+# CoM expressed in the support foot's site frame, whose Z+ is the sole normal):
+#
+#   - At HOME the whole-body CoM sits 44.7 mm OUTSIDE the left sole. The feet are
+#     83.6 mm apart and one sole is only 29 mm wide, so a one-leg stand has to
+#     move the CoM ~45 mm sideways.
+#   - There is no ankle-roll DOF, so trunk roll relative to the support foot is
+#     exactly -hip_roll. The entire lateral authority is the support hip's
+#     roll (38 mm over its full ±22° range) and yaw (25 mm) — yaw helps because
+#     it turns the body so the offset points down the sole's LONG axis (47 mm)
+#     instead of its short one (29 mm).
+#   - Best achievable static margin (CoM to nearest sole edge): 7.0 mm with both
+#     support-hip joints at their mechanical stops, 2.8 mm if they are held to
+#     90% of range, 9.9 mm if the head is also cranked sideways as a
+#     counterweight (head is 38% of body mass).
+#
+# Consequences encoded below and in microduck_one_leg_env_cfg.py:
+#   - The objective is the CoM over the support foot, so it is rewarded
+#     DIRECTLY (com_over_support_phased) rather than implied by a pose.
+#   - At the optimum the remaining joint authority is one-sided: 41.7 mm back
+#     toward the midline, 1.1 mm further over the foot. The swing leg and head
+#     ARE the balance actuators, so nothing here prices them tightly.
+
+
+def whole_body_com_w(asset: Entity) -> torch.Tensor:
+    """Whole-robot CoM in world frame, (B, 3).
+
+    NOT ``root_com_pos_w``: that is ``xipos`` of the ROOT BODY alone
+    (trunk_base — 0.199 kg of the robot's 0.737 kg). The head is 38% of the
+    mass and swings on a long lever, so the trunk's own CoM is not the quantity
+    that has to sit over the support foot. MuJoCo's ``subtree_com`` at the root
+    body is the whole-body CoM.
+
+    (``com_over_support_foot`` above, written for the kick task, uses
+    ``root_com_pos_w``; that is a much looser gate on a mostly-double-support
+    gesture. Do not copy it here.)
+    """
+    return asset.data.data.subtree_com[:, asset.data.indexing.root_body_id]
+
+
+def com_over_support_phased(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+    command_name: str = "twist",
+    std: float = 0.025,
+    descent_end: float = 0.15,
+    hold_end: float = 0.50,
+    rise_end: float = 0.62,
+) -> torch.Tensor:
+    """Gaussian on the horizontal whole-body-CoM ↔ support-foot distance,
+    gated by the phase blend.
+
+    THE task reward: balancing on one leg IS putting the CoM over that foot.
+    Gated by ``phase_pose_blend`` so it pays in proportion to how far the
+    commanded lift has progressed — arriving early pays no more than tracking
+    the ramp, and the return to double support pays it out symmetrically.
+
+    ``asset_cfg`` must name the support foot site (site_names=["left_foot"]).
+    ``std`` is in metres; 0.025 ≈ the sole's lateral half-width, i.e. the error
+    we still care about. The target is the foot SITE origin, which sits ~9 mm
+    inboard of the achievable CoM optimum — deliberately: the gradient then
+    points "further over the foot" everywhere in the reachable set, and the
+    robot cannot overshoot it.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    com_xy = torch.nan_to_num(whole_body_com_w(asset)[:, :2], nan=0.0)
+    foot_xy = torch.nan_to_num(
+        asset.data.site_pos_w[:, asset_cfg.site_ids[0], :2], nan=0.0
+    )
+    dist2 = ((com_xy - foot_xy) ** 2).sum(dim=-1)
+    gate = phase_pose_blend(
+        _gp_phase(env, command_name), descent_end, hold_end, rise_end
+    )
+    return gate * torch.exp(-dist2 / (std**2))
+
+
+def swing_foot_air_phased(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str = "twist",
+    descent_end: float = 0.15,
+    hold_end: float = 0.50,
+    rise_end: float = 0.62,
+) -> torch.Tensor:
+    """Phase-gated reward for the SWING foot being off the ground: blend × (1 - contact).
+
+    The hard state-based gate that makes the maneuver actually one-legged — a
+    pose target alone is satisfiable with the foot still scuffing the floor.
+    Gated by the same blend as everything else, so lifting ahead of the ramp is
+    not a jackpot, and during the rest segment (blend 0) putting the foot back
+    down is free.
+
+    ``sensor_name`` must be a ContactSensor covering ONLY the swing foot.
+    """
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    found = env.scene.sensors[sensor_name].data.found
+    if found.dim() > 1:
+        found = found.sum(dim=-1)
+    airborne = 1.0 - torch.clamp(found, 0.0, 1.0).float()
+    gate = phase_pose_blend(
+        _gp_phase(env, command_name), descent_end, hold_end, rise_end
+    )
+    return gate * airborne
