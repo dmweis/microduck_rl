@@ -47,9 +47,10 @@ def test_bow_pose_directions_match_the_measured_kinematics():
     home_head = HOME_FRAME.joint_pos[r".*head_pitch.*"]
     assert BOW_POSE["neck_pitch"] < home_neck  # neck swings the head forward+down
     assert BOW_POSE["head_pitch"] > home_head  # beak tips down
-    # The bow is purely sagittal — no lopsided yaw/roll in the target.
-    assert BOW_POSE["head_yaw"] == 0.0
-    assert BOW_POSE["head_roll"] == 0.0
+    # ONLY moving joints belong in the tracked target: a joint pinned at its HOME
+    # value scores a perfect 1.0 every step and dilutes the Gaussian mean.
+    # head_yaw / head_roll are held by the separate `bow_sagittal` term.
+    assert set(BOW_POSE) == {"neck_pitch", "head_pitch"}
     # Stay inside the mechanical range (neck_pitch is the tight one: [-1.57, 1.05]).
     assert -1.5 < BOW_POSE["neck_pitch"] < 1.0
     assert -1.5 < BOW_POSE["head_pitch"] < 1.5
@@ -63,8 +64,10 @@ def test_bow_reward_stack(cfg):
     assert r["bow_pose_l1"].func is microduck_mdp.phase_pose_track_l1
     assert r["bow_pose_l1"].weight > 0  # the func self-negates
     assert r["bow_pose"].params["target_pose"] is BOW_POSE
-    # Legs hold the standing stance; feet stay planted and flat.
+    # Legs hold the standing stance; the bow stays sagittal; feet planted+flat.
     assert r["leg_stance"].weight > 0
+    assert r["bow_sagittal"].weight > 0
+    assert r["bow_sagittal"].params["joint_indices"] == [7, 8]  # head_yaw, head_roll
     assert r["feet_grounded"].weight > 0
     assert r["feet_flat"].weight < 0
     # Trunk stays vertical: this is a HEAD bow.
@@ -152,8 +155,8 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from test_ground_pick_pose import _FakeEnv  # noqa: E402  (pytest puts tests/ on sys.path)
 
-_HEAD_NAMES = ["neck_pitch", "head_pitch", "head_yaw", "head_roll"]
-_HOME = torch.tensor([[0.3491, 0.3491, 0.0, 0.0]])
+_HEAD_NAMES = ["neck_pitch", "head_pitch"]
+_HOME = torch.tensor([[0.3491, 0.3491]])
 _BOW = torch.tensor([[BOW_POSE[n] for n in _HEAD_NAMES]])
 
 
@@ -223,3 +226,45 @@ def test_descent_is_gradual_not_a_step():
         asset_cfg=SceneEntityCfg("robot"),
     )
     assert early.item() < 1.0
+
+
+def test_doing_nothing_scores_well_below_a_real_bow():
+    """The tracked target must actually discriminate bowing from standing still.
+
+    Episode_Reward/<term> equals mean(func) * weight for a full-length episode
+    (reward_manager: episode sum / max_episode_length_s, each step scaled by dt),
+    so these numbers are directly the wandb curve to expect.
+
+    Regression guard: head_yaw/head_roll once sat in BOW_POSE at their HOME value.
+    phase_pose_track averages its Gaussian over the joints it is given, so those
+    two scored 1.0 every step regardless of behaviour and halved the gradient —
+    standing still earned 4.55 of a possible 6.00 (76%). With only the moving
+    joints tracked the floor drops to ~3.09 and the signal doubles.
+    """
+    from mjlab_microduck.tasks.mdp import phase_pose_blend
+
+    weight = 6.0
+    phases = torch.linspace(0, 1, 201)[:-1]
+
+    def mean_over_cycle(pose_at):
+        total = 0.0
+        for ph in phases:
+            r = microduck_mdp.phase_pose_track(
+                _bow_env(pose_at(float(ph)), float(ph)),
+                target_pose=BOW_POSE, std=0.15,
+                descent_end=DESCENT_END, hold_end=HOLD_END, rise_end=RISE_END,
+                asset_cfg=SceneEntityCfg("robot"),
+            )
+            total += r.item()
+        return total / len(phases)
+
+    def on_the_ramp(ph):
+        blend = phase_pose_blend(torch.tensor([ph]), DESCENT_END, HOLD_END, RISE_END)
+        return _HOME + blend.unsqueeze(-1) * (_BOW - _HOME)
+
+    stand_still = mean_over_cycle(lambda ph: _HOME) * weight
+    perfect = mean_over_cycle(on_the_ramp) * weight
+
+    assert perfect == pytest.approx(6.0, abs=0.01)
+    assert stand_still < 3.5, f"do-nothing floor too high ({stand_still:.2f}/6.00)"
+    assert perfect - stand_still > 2.5, "not enough gradient between bowing and standing"

@@ -99,19 +99,31 @@ RISE_END    = 0.62
 # bow, nowhere near the ground. Deeper (neck -1.0 / head +0.6) reads as
 # "inspecting its feet" and leaves only 17 mm of CoM margin — see the module
 # docstring's measurements before changing these.
+#
+# ONLY the two joints that actually move belong here. head_yaw / head_roll are
+# held at HOME by `bow_sagittal` below instead. They used to sit in this dict at
+# 0.0, and because phase_pose_track averages the Gaussian over its joints, two
+# always-perfect joints contributed 1.0 every step no matter what the policy did
+# — diluting the signal by half. Measured over a full phase cycle:
+#     4 joints (yaw/roll pinned here): stand-still 4.55 vs perfect 6.00 → signal 1.45
+#     2 joints (this version):         stand-still 3.09 vs perfect 6.00 → signal 2.91
+# i.e. doing nothing scored 76% of the maximum. Keep this dict to moving joints.
 BOW_POSE = {
     "neck_pitch": 0.3491 - 0.70,
     "head_pitch": 0.3491 + 0.40,
-    "head_yaw":   0.0,
-    "head_roll":  0.0,
 }
 # Tracking std ≈ the error we still care about (~9°), not the max error.
 BOW_POSE_STD = 0.15
 # Legs: loose enough to let the policy counterbalance the head, tight enough
 # that "stand still" stays the stance.
 LEG_POSE_STD = 0.25
+# head_yaw / head_roll: tighter than the legs — the legs need freedom to
+# counterbalance, a bow does not need to twist.
+SAGITTAL_STD = 0.15
 
 _LEG_JOINTS = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]
+# head_yaw, head_roll (servo indices; see the joint layout in the docstring).
+_YAW_ROLL_JOINTS = [7, 8]
 
 # Pushes: the bow is a quasi-static gesture, so pushes start gentle and ramp in
 # only after the motion exists (ground_pick's ±0.3 "made it fall even standing
@@ -187,6 +199,16 @@ def make_microduck_polite_bow_env_cfg(play: bool = False) -> ManagerBasedRlEnvCf
         func=microduck_mdp.pose_target_match,
         weight=2.0,
         params={"std": LEG_POSE_STD, "joint_indices": _LEG_JOINTS},
+    )
+
+    # Keep the bow sagittal: head_yaw / head_roll held at HOME. Separate from
+    # bow_pose on purpose — folding them into the tracked target halves that
+    # reward's gradient (see the BOW_POSE comment), and they want a tighter
+    # tolerance than the legs anyway.
+    cfg.rewards["bow_sagittal"] = RewardTermCfg(
+        func=microduck_mdp.pose_target_match,
+        weight=1.0,
+        params={"std": SAGITTAL_STD, "joint_indices": _YAW_ROLL_JOINTS},
     )
 
     # Both feet stay planted and flat: the bow must not turn into a step, a
