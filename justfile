@@ -116,3 +116,60 @@ sim-bow run_id checkpoint="":
         --walking            "$D/alpha_walking.onnx" \
         --ground-pick        bow.onnx \
         --ground-pick-period 4.0
+
+# ── OneLeg (flamingo balance) ─────────────────────────────────────────────────
+# Read the module docstring of microduck_one_leg_env_cfg.py before tuning this
+# one: the static margin for a microduck one-leg stand is ~7 mm and only exists
+# with the support hip near its mechanical stops. It is the tightest task in the
+# set, and several regularisers had to be relaxed to make it possible at all.
+
+# Smoke-test the one-leg balance locally on CPU (64 envs, 5 iters, ~15 s).
+smoke-oneleg:
+    uv run train Mjlab-OneLeg-Flat-MicroDuck \
+        --env.scene.num-envs 64 --agent.max_iterations 5 \
+        --gpu-ids None --agent.logger tensorboard
+
+# Balance is a harder skill than a head gesture: budget more than the bow's
+# ~1000 iters (AGENTS: gaits and curriculum-heavy tasks need 4000-6000; this
+# sits in between). The push curriculum's last stage lands at iteration 1400,
+# so a run shorter than that never sees the robustness training at all.
+
+# Train the one-leg balance on HF Jobs (4096 envs).
+train-oneleg iters="2000" timeout="4h":
+    uv run train Mjlab-OneLeg-Flat-MicroDuck \
+        --env.scene.num-envs 4096 --agent.max_iterations {{iters}} \
+        --agent.save-interval 100 \
+        --hf-jobs --namespace {{hf_namespace}} --timeout {{timeout}}
+
+# Continue a one-leg run on HF Jobs from its latest wandb checkpoint.
+resume-oneleg run_id iters="2000" timeout="4h":
+    uv run train Mjlab-OneLeg-Flat-MicroDuck \
+        --env.scene.num-envs 4096 --agent.max_iterations {{iters}} \
+        --agent.save-interval 100 \
+        --agent.resume True \
+        --wandb-run-path {{wandb_entity}}/mjlab_microduck/{{run_id}} \
+        --hf-jobs --namespace {{hf_namespace}} --timeout {{timeout}}
+
+# Pulls the checkpoint from wandb, exports with the obs normalizer BAKED IN,
+# then runs the CPU MuJoCo rehearsal with the official walking policy in the
+# other slot. The balance rides the ground-pick slot, so press G in the viewer
+# to trigger it; the period must match ONE_LEG_PERIOD in the env cfg.
+
+# Export a one-leg checkpoint from wandb and watch it in the local sim.
+sim-oneleg run_id checkpoint="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    D=$({{just_executable()}} policies)
+    CKPT_ARG=""
+    [ -n "{{checkpoint}}" ] && CKPT_ARG="--checkpoint {{checkpoint}}"
+    uv run scripts/export.py Mjlab-OneLeg-Flat-MicroDuck \
+        --wandb-run-path {{wandb_entity}}/mjlab_microduck/{{run_id}} \
+        $CKPT_ARG --num-envs 1
+    mv output.onnx one_leg.onnx
+    # macOS forces mujoco.viewer.launch_passive to run under `mjpython`.
+    PY=$([ "$(uname -s)" = "Darwin" ] && echo mjpython || echo python)
+    uv run "$PY" scripts/infer_policy.py \
+        --new-cmd-obs \
+        --walking            "$D/alpha_walking.onnx" \
+        --ground-pick        one_leg.onnx \
+        --ground-pick-period 6.0
