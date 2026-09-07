@@ -2,6 +2,11 @@
 
 policies_repo := "pollen-robotics/microduck-policies"
 
+# HF namespace the Jobs bill to; the src tarball, checkpoint repo and uv cache
+# bucket all live here. wandb entity is where --wandb-run-path resolves runs.
+hf_namespace := "DavidMakesRobots"
+wandb_entity := "dweis7-davidmakesrobots"
+
 [private]
 default:
     @just --list
@@ -45,3 +50,43 @@ run-roller-sim:
         --walking           "$D/roller.onnx" \
         --ground-pick       "$D/roller_crouch.onnx" \
         --ground-pick-period 5.0
+
+# `--gpu-ids None` is what puts mjlab in CPU mode: the default `[0]` dies in
+# select_gpus on a machine without CUDA. Costs nothing and needs no wandb
+# account. Run it after ANY cfg change and before paying for a GPU — it catches
+# ~95% of config errors: obs shape, every reward term computing, penalty signs,
+# NaN-freedom, ONNX export.
+
+# Smoke-test the polite bow locally on CPU (64 envs, 5 iters, ~15 s).
+smoke-bow:
+    uv run train Mjlab-PoliteBow-Flat-MicroDuck \
+        --env.scene.num-envs 64 --agent.max_iterations 5 \
+        --gpu-ids None --agent.logger tensorboard
+
+# l4x1 @ $0.80/h; ~1000 iters is roughly $0.50. Ctrl-C detaches without killing
+# the job — manage it afterwards with `hf jobs ps -a` / `hf jobs cancel <id>`.
+# save-interval 100 overrides the cfg's 250 so a timeout or a cancel loses at
+# most 99 iterations; the uploader pushes each checkpoint to the HF model repo
+# within 60 s and wandb keeps a copy for `resume-bow`. The timeout is the cost
+# ceiling, not just a safety net: 2 h on l4x1 caps the run at $1.60.
+
+# Train the polite bow on HF Jobs (4096 envs).
+train-bow iters="1000" timeout="2h":
+    uv run train Mjlab-PoliteBow-Flat-MicroDuck \
+        --env.scene.num-envs 4096 --agent.max_iterations {{iters}} \
+        --agent.save-interval 100 \
+        --hf-jobs --namespace {{hf_namespace}} --timeout {{timeout}}
+
+# e.g. `just resume-bow abc123xy 2000`, where run_id is the wandb run id (the
+# trailing part of the run URL). Resume MUST go through wandb here: the job
+# tarball is built from `git ls-files`, so the gitignored logs/ dir is absent
+# inside a fresh job and --agent.load-run would find nothing to load.
+
+# Continue a polite-bow run on HF Jobs from its latest wandb checkpoint.
+resume-bow run_id iters="1000" timeout="2h":
+    uv run train Mjlab-PoliteBow-Flat-MicroDuck \
+        --env.scene.num-envs 4096 --agent.max_iterations {{iters}} \
+        --agent.save-interval 100 \
+        --agent.resume True \
+        --wandb-run-path {{wandb_entity}}/mjlab_microduck/{{run_id}} \
+        --hf-jobs --namespace {{hf_namespace}} --timeout {{timeout}}
